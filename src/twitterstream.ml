@@ -1,0 +1,85 @@
+open Cohttp
+module C  = Cohttp_lwt_unix.Client
+module CB = Cohttp_lwt_body
+
+let (>>=) = Lwt.bind
+
+type creds = {
+  consumer_key: string;
+  consumer_secret: string;
+  access_token: string;
+  access_token_secret: string;
+}
+
+let creds_of_json json =
+  let extract_field name assoc = match List.assoc name assoc with
+    | `String s -> s
+    | _ -> raise (Invalid_argument "corrupted input") in
+  match json with
+  | `Assoc assoc -> {
+      consumer_key = extract_field "consumer_key" assoc;
+      consumer_secret = extract_field "consumer_secret" assoc;
+      access_token = extract_field "access_token" assoc;
+      access_token_secret = extract_field "access_token_secret" assoc
+    }
+  | _ -> raise (Invalid_argument "input is not a JSON object")
+
+let nonce ?(len=32) rng =
+  let open Cryptokit in
+  transform_string (Base64.encode_compact ()) (Random.string rng len)
+
+(* https://dev.twitter.com/docs/auth/authorizing-request *)
+(* https://dev.twitter.com/docs/auth/creating-signature *)
+let signed_call ?(headers=Header.init ()) ?(body=[]) ?chunked ~rng ~creds meth uri =
+  let open Cryptokit in
+  let base_uri = Uri.to_string (Uri.with_query uri []) in
+  let query_params = Uri.query uri in
+  let fixed_params =
+    ["oauth_consumer_key", [creds.consumer_key];
+     "oauth_nonce", [nonce rng];
+     "oauth_signature_method", ["HMAC-SHA1"];
+     "oauth_timestamp", [string_of_float (Unix.time ())];
+     "oauth_token", [creds.access_token];
+     "oauth_version", ["1.0"]
+    ] in
+  let all_params = body @ query_params @ fixed_params in
+  let all_params = List.map (fun (k, vs) -> Uri.pct_encode k, List.map (Uri.pct_encode) vs) all_params in
+  let all_params = List.fast_sort (fun a b -> String.compare (fst b) (fst b)) all_params in
+  let all_params = List.map (fun (k, vs) -> k, String.concat "," vs) all_params in
+  let all_params = List.map (fun (k, v) -> k ^ "=" ^ v) all_params in
+  let params_string = String.concat "&" all_params in
+  let base_string = [Code.string_of_method meth; Uri.pct_encode base_uri; Uri.pct_encode params_string] in
+  let base_string = String.concat "&" base_string in
+  let signing_key = Uri.pct_encode creds.consumer_secret ^ "&" ^ Uri.pct_encode creds.access_token_secret in
+  let signature = hash_string (MAC.hmac_sha1 signing_key) base_string in
+  let signature = transform_string (Base64.encode_compact_pad ()) signature in
+  let authorization_string = ("oauth_signature", [signature])::fixed_params in
+  let authorization_string = List.map (fun (k, vs) ->
+      Uri.pct_encode k,
+      "\"" ^ Uri.pct_encode (List.hd vs) ^ "\"") authorization_string in
+  let authorization_string = List.map (fun (k, v) -> k ^ "=" ^ v) authorization_string in
+  let headers = Header.add headers "Authorization" ("OAuth " ^ String.concat ", " authorization_string) in
+  let body_string = List.map (fun (k, vs) -> k, String.concat "," vs) body in
+  let body_string = List.map (fun (k, v) -> k ^ "=" ^ v) body_string in
+  let body_string = String.concat "&" body_string in
+  let body = CB.body_of_string body_string in
+  C.call ~headers ?body ?chunked meth uri
+
+let _ =
+  let open Cryptokit in
+  let ic = open_in ".twitterstream" in
+  let creds = creds_of_json (Yojson.Basic.from_channel ic) in
+  let rng = Random.pseudo_rng (Random.string Random.secure_rng 20) in
+  let cmdargs = Array.to_list Sys.argv in
+  Lwt_main.run
+    begin
+      signed_call ~body:["track", cmdargs] ~rng ~creds `POST (Uri.of_string "https://stream.twitter.com/1.1/statuses/filter.json")
+      >>= function
+      | None -> Printf.printf "No response, exiting... :(\n%!"; exit 0
+      | Some (resp, body) ->
+        let body_stream = CB.stream_of_body body in
+        let rec print_body_forever stream =
+          Lwt_stream.next stream >>= fun frag -> Printf.printf "%s\n" frag; print_body_forever stream in
+        print_body_forever body_stream
+    end
+
