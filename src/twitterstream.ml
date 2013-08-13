@@ -50,10 +50,8 @@ let signed_call ?(headers=Header.init ()) ?(body=[]) ?chunked ~rng ~creds meth u
   let all_params = List.map (fun (k, vs) -> k, String.concat "," vs) all_params in
   let all_params = List.map (fun (k, v) -> k ^ "=" ^ v) all_params in
   let params_string = String.concat "&" all_params in
-  Printf.printf "%s\n%!" params_string;
   let base_string = [Code.string_of_method meth; pct_encode base_uri; pct_encode params_string] in
   let base_string = String.concat "&" base_string in
-  Printf.printf "%s\n%!" base_string;
   let signing_key = pct_encode creds.consumer_secret ^ "&" ^ pct_encode creds.access_token_secret in
   let signature = hash_string (MAC.hmac_sha1 signing_key) base_string in
   let signature = transform_string (Base64.encode_compact_pad ()) signature in
@@ -63,7 +61,6 @@ let signed_call ?(headers=Header.init ()) ?(body=[]) ?chunked ~rng ~creds meth u
       "\"" ^ pct_encode (List.hd vs) ^ "\"") authorization_string in
   let authorization_string = List.fast_sort compare (List.map (fun (k, v) -> k ^ "=" ^ v) authorization_string) in
   let authorization_string = ("OAuth " ^ String.concat ", " authorization_string) in
-  Printf.printf "%s\n%!" authorization_string;
   let body_string = List.map (fun (k, vs) -> k, String.concat "," vs) body in
   let body_string = List.map (fun (k, v) -> k ^ "=" ^ v) body_string in
   let body_string = String.concat "&" body_string in
@@ -80,6 +77,7 @@ let signed_call ?(headers=Header.init ()) ?(body=[]) ?chunked ~rng ~creds meth u
 let _ =
   let open Cryptokit in
   let ic = open_in ".twitterstream" in
+  let oc = open_out "twitter.stdout" in
   let creds = creds_of_json (Yojson.Basic.from_channel ic) in
   let rng = Random.pseudo_rng (Random.string Random.secure_rng 20) in
   let cmdargs = List.tl (Array.to_list Sys.argv) in
@@ -93,7 +91,9 @@ let _ =
         let rec print_body_forever stream =
           Lwt.catch
             (fun () -> Lwt_stream.next stream >>= fun frag ->
-              Printf.printf "%s\n" frag; print_body_forever stream)
+              Printf.printf "%s" frag;
+              Printf.fprintf oc "%s" frag;
+              print_body_forever stream)
             (fun _ -> Lwt.return ())
         in
         print_body_forever body_stream
