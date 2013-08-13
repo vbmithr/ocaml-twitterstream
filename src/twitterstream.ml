@@ -69,11 +69,12 @@ let signed_call ?(headers=Header.init ()) ?(body=[]) ?chunked ~rng ~creds meth u
   let body_string = String.concat "&" body_string in
   let body = CB.body_of_string body_string in
   let headers = List.fold_left (fun a (k,v) -> Header.add a k v) headers
-      [ "User-Agent", "athanor/0.1";
-        "Authorization", authorization_string;
-        "Content-Length", string_of_int (String.length body_string);
-        "Content-Type", "application/x-www-form-urlencoded";
-      ] in
+      ([ "User-Agent", "athanor/0.1";
+        "Authorization", authorization_string
+      ] @ if meth = `POST then [
+      "Content-Length", string_of_int (String.length body_string);
+      "Content-Type", "application/x-www-form-urlencoded"
+    ] else []) in
   C.call ~headers ?body ?chunked meth uri
 
 let _ =
