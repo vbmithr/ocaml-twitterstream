@@ -1,8 +1,10 @@
 open Cohttp
 module C  = Cohttp_lwt_unix.Client
 module CB = Cohttp_lwt_body
+module YB = Yojson.Basic
 
 let (>>=) = Lwt.bind
+let (|>) x f = f x
 
 type creds = {
   consumer_key: string;
@@ -74,11 +76,46 @@ let signed_call ?(headers=Header.init ()) ?(body=[]) ?chunked ~rng ~creds meth u
     ] else []) in
   C.call ~headers ?body ?chunked meth uri
 
+(* Filter out everything that is not a tweet object *)
+let is_tweet = function
+  | `Assoc _ as a -> (match YB.Util.member "created_at" a with `Null -> false | _ -> true)
+  | _ -> false
+
+let sanitize_json_object f = function
+  | `Assoc assocs -> `Assoc (YB.Util.filter_map f assocs)
+  | _ -> raise (Invalid_argument "not a JSON object")
+
+let sanitize_user kv = match fst kv with
+  | "created_at" -> Some kv
+  | "description" -> Some kv
+  | "followers_count" -> Some kv
+  | "friends_count" -> Some kv
+  | "id_str" -> Some kv
+  | "lang" -> Some kv
+  | "name" -> Some kv
+  | "screen_name" -> Some kv
+  | "statuses_count" -> Some kv
+  | "url" -> Some kv
+  | "utc_offset" -> Some kv
+  | _ -> None
+
+let sanitize_tweet kv = match fst kv with
+  | "created_at" -> Some kv
+  | "favorite_count" -> Some kv
+  | "id_str" -> Some kv
+  | "in_reply_to_status_id" -> Some kv
+  | "in_reply_to_user_id" -> Some kv
+  | "lang" -> Some kv
+  | "text" -> Some kv
+  | "retweet_count" -> Some kv
+  | "retweeted" -> Some kv
+  | "user" -> Some ("user", sanitize_json_object sanitize_user (snd kv))
+  | _ -> None
+
 let _ =
   let open Cryptokit in
   let ic = open_in ".twitterstream" in
-  let oc = open_out "twitter.stdout" in
-  let creds = creds_of_json (Yojson.Basic.from_channel ic) in
+  let creds = creds_of_json (YB.from_channel ic) in
   let rng = Random.pseudo_rng (Random.string Random.secure_rng 20) in
   let cmdargs = List.tl (Array.to_list Sys.argv) in
   Lwt_main.run
@@ -87,15 +124,13 @@ let _ =
       >>= function
       | None -> Printf.printf "No response, exiting... :(\n%!"; exit 0
       | Some (resp, body) ->
-        let body_stream = CB.stream_of_body body in
-        let rec print_body_forever stream =
-          Lwt.catch
-            (fun () -> Lwt_stream.next stream >>= fun frag ->
-              Printf.printf "%s" frag;
-              Printf.fprintf oc "%s" frag;
-              print_body_forever stream)
-            (fun _ -> Lwt.return ())
-        in
-        print_body_forever body_stream
+        Lwt.catch
+          Lwt_stream.(fun () ->
+              CB.stream_of_body body
+              |> map (fun s -> try YB.from_string s with _ -> `Null)
+              |> filter is_tweet
+              |> map (sanitize_json_object sanitize_tweet)
+              |> map (YB.to_string ~std:true)
+              |> iter_s Lwt_io.printl)
+          (fun _ -> Lwt.return ())
     end
-
