@@ -21,3 +21,4 @@
 <src/*.ml{,i}>: pkg_cryptokit
 <src/*.ml{,i}>: pkg_yojson
 # OASIS_STOP
+true: annot
