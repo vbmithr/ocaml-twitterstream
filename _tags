@@ -1,5 +1,5 @@
 # OASIS_START
-# DO NOT EDIT (digest: 39296ad44fe29a8c33c6d96a171bd30f)
+# DO NOT EDIT (digest: c391a30d6e283c9b0e08a3c56ccf9567)
 # Ignore VCS directories, you can use the same kind of rule outside 
 # OASIS_START/STOP if you want to exclude directories that contains 
 # useless stuff for the build process
@@ -17,8 +17,10 @@
 <src/twitterstream.{native,byte}>: pkg_cohttp.lwt
 <src/twitterstream.{native,byte}>: pkg_cryptokit
 <src/twitterstream.{native,byte}>: pkg_yojson
+<src/twitterstream.{native,byte}>: pkg_couchdb
 <src/*.ml{,i}>: pkg_cohttp.lwt
 <src/*.ml{,i}>: pkg_cryptokit
 <src/*.ml{,i}>: pkg_yojson
+<src/*.ml{,i}>: pkg_couchdb
 # OASIS_STOP
 true: annot

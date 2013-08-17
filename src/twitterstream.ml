@@ -118,7 +118,7 @@ let sanitize_user kv = match fst kv with
   | "description" -> Some kv
   | "followers_count" -> Some kv
   | "friends_count" -> Some kv
-  | "id_str" -> Some kv
+  | "id_str" -> Some ("_id", snd kv)
   | "lang" -> Some kv
   | "name" -> Some kv
   | "screen_name" -> Some kv
@@ -132,7 +132,7 @@ let sanitize_tweet kv = match fst kv with
     sanitize_date |> fst |> int_of_float |> string_of_int
     |> fun t -> Some ("created_at", `String t)
   | "favorite_count" -> Some kv
-  | "id_str" -> Some kv
+  | "id_str" -> Some ("_id", snd kv)
   | "in_reply_to_status_id" -> Some kv
   | "in_reply_to_user_id" -> Some kv
   | "lang" -> Some kv
@@ -142,25 +142,32 @@ let sanitize_tweet kv = match fst kv with
   | "user" -> Some ("user", sanitize_json_object sanitize_user (snd kv))
   | _ -> None
 
+let main ~creds ~rng ~cmdargs =
+  let h = Couchdb.handle () in
+  Couchdb.DB.create h "twitter"
+  >>= fun _ ->
+  let rec inner () =
+    signed_call ~body:["track", cmdargs] ~rng ~creds `POST
+      (Uri.of_string "https://stream.twitter.com/1.1/statuses/filter.json")
+    >>= function
+    | None -> Lwt_unix.sleep 10. >>= fun () -> inner ()
+    | Some (resp, body) ->
+      Lwt.catch
+        Lwt_stream.(fun () ->
+            CB.stream_of_body body
+            |> map (fun s -> try YB.from_string s with _ -> `Null)
+            |> filter is_tweet
+            |> map (sanitize_json_object sanitize_tweet)
+            |> iter_s (fun json ->
+                Lwt.async (fun () -> Couchdb.Doc.add h "twitter" json);
+                YB.to_string ~std:true json |> Lwt_io.printl))
+        (fun _ -> inner ())
+  in inner ()
+
 let _ =
   let open Cryptokit in
   let ic = open_in ".twitterstream" in
   let creds = creds_of_json (YB.from_channel ic) in
   let rng = Random.pseudo_rng (Random.string Random.secure_rng 20) in
   let cmdargs = List.tl (Array.to_list Sys.argv) in
-  Lwt_main.run
-    begin
-      signed_call ~body:["track", cmdargs] ~rng ~creds `POST (Uri.of_string "https://stream.twitter.com/1.1/statuses/filter.json")
-      >>= function
-      | None -> Printf.printf "No response, exiting... :(\n%!"; exit 0
-      | Some (resp, body) ->
-        Lwt.catch
-          Lwt_stream.(fun () ->
-              CB.stream_of_body body
-              |> map (fun s -> try YB.from_string s with _ -> `Null)
-              |> filter is_tweet
-              |> map (sanitize_json_object sanitize_tweet)
-              |> map (YB.to_string ~std:true)
-              |> iter_s Lwt_io.printl)
-          (fun _ -> Lwt.return ())
-    end
+  Lwt_main.run (main creds rng cmdargs)
