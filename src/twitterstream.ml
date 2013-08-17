@@ -85,8 +85,36 @@ let sanitize_json_object f = function
   | `Assoc assocs -> `Assoc (YB.Util.filter_map f assocs)
   | _ -> raise (Invalid_argument "not a JSON object")
 
+let sanitize_date date_string =
+  let int_of_month = function
+    | "Jan" -> 0 | "Feb" -> 1 | "Mar" -> 2 | "Apr" -> 3 | "May" -> 4
+    | "Jun" -> 5 | "Jul" -> 6 | "Aug" -> 7 | "Sep" -> 8 | "Oct" -> 9
+    | "Nov" -> 10 | "Dec" -> 11
+    | s -> raise (Invalid_argument s) in
+  let int_of_day = function
+    | "Sun" -> 0 | "Mon" -> 1 | "Tue" -> 2 | "Wed" -> 3 | "Thu" -> 4
+    | "Fri" -> 5 | "Sat" -> 6
+    | s -> raise (Invalid_argument s) in
+  let open Re_str in
+  let rex = regexp " +" in
+  let rex_colon = regexp ":" in
+  match split rex date_string with
+  | [day; month; mday; hour; zone; year] ->
+    (match split rex_colon hour with
+     | [hh; mm; ss] ->
+       let open Unix in
+       mktime { tm_sec = int_of_string ss; tm_min = int_of_string mm;
+                tm_hour = int_of_string hh; tm_mday = int_of_string mday;
+                tm_mon = int_of_month month; tm_year = (int_of_string year) - 1900;
+                tm_wday = int_of_day day; tm_yday = 0; tm_isdst = false }
+     | _ -> raise (Invalid_argument "not a twitter date")
+    )
+  | _ -> raise (Invalid_argument "not a twitter date")
+
 let sanitize_user kv = match fst kv with
-  | "created_at" -> Some kv
+  | "created_at" -> snd kv |> YB.Util.to_string |>
+    sanitize_date |> fst |> int_of_float |> string_of_int
+    |> fun t -> Some ("created_at", `String t)
   | "description" -> Some kv
   | "followers_count" -> Some kv
   | "friends_count" -> Some kv
@@ -100,7 +128,9 @@ let sanitize_user kv = match fst kv with
   | _ -> None
 
 let sanitize_tweet kv = match fst kv with
-  | "created_at" -> Some kv
+  | "created_at" -> snd kv |> YB.Util.to_string |>
+    sanitize_date |> fst |> int_of_float |> string_of_int
+    |> fun t -> Some ("created_at", `String t)
   | "favorite_count" -> Some kv
   | "id_str" -> Some kv
   | "in_reply_to_status_id" -> Some kv
