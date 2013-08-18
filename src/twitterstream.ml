@@ -143,8 +143,8 @@ let sanitize_tweet kv = match fst kv with
   | _ -> None
 
 let main ?db_uri ~creds ~rng ~tracks =
-  let h = Couchdb.handle ?uri:db_uri () in
-  Couchdb.DB.create h "twitter"
+  Couchdb.handle ?uri:db_uri ()
+  >>= fun h -> Couchdb.DB.create h "twitter"
   >>= fun _ ->
   let rec inner () =
     signed_call ~body:["track", tracks] ~rng ~creds `POST
@@ -171,10 +171,10 @@ let _ =
   let tracks = ref [] in
   let speclist = align [
       "--conf", Set_string conf_file, "<string> Path of the configuration file (default: .twitterstream).";
-      "--db_uri", Set_string db_uri, "<string> URI of the CouchDB database in use (default: http://localhost:5984)."
+      "--db-uri", Set_string db_uri, "<string> URI of the CouchDB database in use (default: http://localhost:5984)."
     ] in
   let anon_fun s = tracks := s::!tracks in
-  let usage_msg = "Usage: " ^ Sys.argv.(0) ^ " [--conf <string>] [--db_uri <string>] track [tracks...]" in
+  let usage_msg = "Usage: " ^ Sys.argv.(0) ^ " [--conf <string>] [--db-uri <string>] track [tracks...]" in
   parse speclist anon_fun usage_msg;
   let ic = open_in !conf_file in
   let creds = creds_of_json (YB.from_channel ic) in
