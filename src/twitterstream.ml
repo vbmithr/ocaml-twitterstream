@@ -142,12 +142,12 @@ let sanitize_tweet kv = match fst kv with
   | "user" -> Some ("user", sanitize_json_object sanitize_user (snd kv))
   | _ -> None
 
-let main ~creds ~rng ~cmdargs =
-  let h = Couchdb.handle () in
+let main ?db_uri ~creds ~rng ~tracks =
+  let h = Couchdb.handle ?uri:db_uri () in
   Couchdb.DB.create h "twitter"
   >>= fun _ ->
   let rec inner () =
-    signed_call ~body:["track", cmdargs] ~rng ~creds `POST
+    signed_call ~body:["track", tracks] ~rng ~creds `POST
       (Uri.of_string "https://stream.twitter.com/1.1/statuses/filter.json")
     >>= function
     | None -> Lwt_unix.sleep 10. >>= fun () -> inner ()
@@ -165,9 +165,20 @@ let main ~creds ~rng ~cmdargs =
   in inner ()
 
 let _ =
-  let open Cryptokit in
-  let ic = open_in ".twitterstream" in
+  let open Arg in
+  let db_uri = ref "http://localhost:5984" in
+  let conf_file = ref ".twitterstream" in
+  let tracks = ref [] in
+  let speclist = align [
+      "--conf", Set_string conf_file, "<string> Path of the configuration file (default: .twitterstream).";
+      "--db_uri", Set_string db_uri, "<string> URI of the CouchDB database in use (default: http://localhost:5984)."
+    ] in
+  let anon_fun s = tracks := s::!tracks in
+  let usage_msg = "Usage: " ^ Sys.argv.(0) ^ " [--conf <string>] [--db_uri <string>] track [tracks...]" in
+  parse speclist anon_fun usage_msg;
+  let ic = open_in !conf_file in
   let creds = creds_of_json (YB.from_channel ic) in
+  close_in ic;
+  let open Cryptokit in
   let rng = Random.pseudo_rng (Random.string Random.secure_rng 20) in
-  let cmdargs = List.tl (Array.to_list Sys.argv) in
-  Lwt_main.run (main creds rng cmdargs)
+  Lwt_main.run (main ~db_uri:!db_uri ~creds ~rng ~tracks:!tracks)
