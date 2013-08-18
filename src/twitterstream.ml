@@ -6,6 +6,8 @@ module YB = Yojson.Basic
 let (>>=) = Lwt.bind
 let (|>) x f = f x
 
+let daemonize = ref false
+
 type creds = {
   consumer_key: string;
   consumer_secret: string;
@@ -160,7 +162,9 @@ let main ?db_uri ~creds ~rng ~tracks =
             |> map (sanitize_json_object sanitize_tweet)
             |> iter_s (fun json ->
                 Lwt.async (fun () -> Couchdb.Doc.add h "twitter" json);
-                YB.to_string ~std:true json |> Lwt_io.printl))
+                if not !daemonize then YB.to_string ~std:true json |> Lwt_io.printl
+                else Lwt.return ())
+          )
         (fun _ -> inner ())
   in inner ()
 
@@ -171,7 +175,8 @@ let _ =
   let tracks = ref [] in
   let speclist = align [
       "--conf", Set_string conf_file, "<string> Path of the configuration file (default: .twitterstream).";
-      "--db-uri", Set_string db_uri, "<string> URI of the CouchDB database in use (default: http://localhost:5984)."
+      "--db-uri", Set_string db_uri, "<string> URI of the CouchDB database in use (default: http://localhost:5984).";
+      "--daemon", Set daemonize, "Start the program as a daemon."
     ] in
   let anon_fun s = tracks := s::!tracks in
   let usage_msg = "Usage: " ^ Sys.argv.(0) ^ " [--conf <string>] [--db-uri <string>] track [tracks...]" in
@@ -179,6 +184,7 @@ let _ =
   let ic = open_in !conf_file in
   let creds = creds_of_json (YB.from_channel ic) in
   close_in ic;
+  if !daemonize then Lwt_daemon.daemonize ();
   let open Cryptokit in
   let rng = Random.pseudo_rng (Random.string Random.secure_rng 20) in
   Lwt_main.run (main ~db_uri:!db_uri ~creds ~rng ~tracks:!tracks)
