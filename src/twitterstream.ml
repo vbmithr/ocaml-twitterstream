@@ -184,7 +184,7 @@ let _ =
       "--daemon", Set daemonize, " Start the program as a daemon."
     ] in
   let anon_fun s = tracks := s::!tracks in
-  let usage_msg = "Usage: " ^ Sys.argv.(0) ^ " [--conf <string>] [--db-uri <string>] track [tracks...]" in
+  let usage_msg = "Usage: " ^ Sys.argv.(0) ^ " <options> track [tracks...]\nOptions are:" in
   parse speclist anon_fun usage_msg;
   let ic = open_in !conf_file in
   let creds = creds_of_json (YB.from_channel ic) in
