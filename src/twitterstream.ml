@@ -154,18 +154,19 @@ let main ?db_uri ~creds ~rng ~tracks =
     >>= function
     | None -> Lwt_unix.sleep 10. >>= fun () -> inner ()
     | Some (resp, body) ->
-      Lwt.catch
-        Lwt_stream.(fun () ->
-            CB.stream_of_body body
-            |> map (fun s -> try YB.from_string s with _ -> `Null)
-            |> filter is_tweet
-            |> map (sanitize_json_object sanitize_tweet)
-            |> iter_s (fun json ->
-                Lwt.async (fun () -> Couchdb.Doc.add h "twitter" json);
-                if not !daemonize then YB.to_string ~std:true json |> Lwt_io.printl
-                else Lwt.return ())
-          )
-        (fun _ -> inner ())
+      Lwt_stream.(
+        CB.stream_of_body body
+        |> map (fun s -> try YB.from_string s with _ -> `Null)
+        |> filter is_tweet
+        |> map (sanitize_json_object sanitize_tweet)
+        |> iter_s (fun json ->
+            let id = json |> YB.Util.member "_id" |> YB.Util.to_string in
+            Lwt.try_bind (fun () -> Couchdb.Doc.add h "twitter" json)
+              (function
+                | `Success (st, _) -> Lwt_io.printf "%s %s\n" id (Couchdb.string_of_status st)
+                | `Failure (st, err) -> Lwt_io.printf "%s %s: %s\n" id (Couchdb.string_of_status st) err)
+              (fun exn -> Lwt_io.printf "%s %s\n" id (Printexc.to_string exn)))
+      )
   in inner ()
 
 let _ =
@@ -176,7 +177,7 @@ let _ =
   let speclist = align [
       "--conf", Set_string conf_file, "<string> Path of the configuration file (default: .twitterstream).";
       "--db-uri", Set_string db_uri, "<string> URI of the CouchDB database in use (default: http://localhost:5984).";
-      "--daemon", Set daemonize, "Start the program as a daemon."
+      "--daemon", Set daemonize, " Start the program as a daemon."
     ] in
   let anon_fun s = tracks := s::!tracks in
   let usage_msg = "Usage: " ^ Sys.argv.(0) ^ " [--conf <string>] [--db-uri <string>] track [tracks...]" in
