@@ -145,14 +145,12 @@ let sanitize_tweet kv = match fst kv with
   | _ -> None
 
 let main ?db_uri ~creds ~rng ~tracks =
-  Couchdb.handle ?uri:db_uri ()
-  >>= fun h -> Couchdb.DB.create h "twitter"
-  >>= fun _ ->
-  let rec inner () =
+  Couchdb.handle ?uri:db_uri () >>= fun h ->
+  Couchdb.DB.create h "twitter" >>= fun _ ->
+  let main_exn () =
     signed_call ~body:["track", tracks] ~rng ~creds `POST
-      (Uri.of_string "https://stream.twitter.com/1.1/statuses/filter.json")
-    >>= function
-    | None -> Lwt_unix.sleep 10. >>= fun () -> inner ()
+      (Uri.of_string "https://stream.twitter.com/1.1/statuses/filter.json") >>= function
+    | None -> Lwt.fail (Failure "signed_call returned None")
     | Some (resp, body) ->
       Lwt_stream.(
         CB.stream_of_body body
@@ -161,13 +159,23 @@ let main ?db_uri ~creds ~rng ~tracks =
         |> map (sanitize_json_object sanitize_tweet)
         |> iter_s (fun json ->
             let id = json |> YB.Util.member "_id" |> YB.Util.to_string in
-            Lwt.try_bind (fun () -> Couchdb.Doc.add h "twitter" json)
+            (* Capture exceptions from CouchDB. We don't want to
+               reconnect to twitter because of a CouchDB error. *)
+            Lwt.try_bind
+              (fun () -> Couchdb.Doc.add h "twitter" json)
               (function
-                | `Success (st, _) -> Lwt_io.printf "%s %s\n" id (Couchdb.string_of_status st)
-                | `Failure (st, err) -> Lwt_io.printf "%s %s: %s\n" id (Couchdb.string_of_status st) err)
-              (fun exn -> Lwt_io.printf "%s %s\n" id (Printexc.to_string exn)))
-      )
-  in inner ()
+                 | `Success (st, _) -> Lwt_io.printf "%s %s\n" id (Couchdb.string_of_status st)
+                 | `Failure (st, err) -> Lwt_io.printf "%s %s: %s\n" id (Couchdb.string_of_status st) err)
+              (fun exn -> Lwt_io.printf "%s: CouchDB raised %s\n" id (Printexc.to_string exn))
+          ))
+  in
+  let rec main () =
+    Lwt.catch main_exn
+      (fun exn ->
+         Lwt_io.printf "Caught unhandled exception %s\n"
+           (Printexc.to_string exn)) >>= fun () ->
+    main ()
+  in main ()
 
 let _ =
   let open Arg in
