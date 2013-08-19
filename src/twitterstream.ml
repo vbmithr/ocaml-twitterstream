@@ -117,15 +117,11 @@ let sanitize_user kv = match fst kv with
   | "created_at" -> snd kv |> YB.Util.to_string |>
     sanitize_date |> fst |> int_of_float |> string_of_int
     |> fun t -> Some ("created_at", `String t)
-  | "description" -> Some kv
   | "followers_count" -> Some kv
   | "friends_count" -> Some kv
   | "id_str" -> Some ("_id", snd kv)
   | "lang" -> Some kv
-  | "name" -> Some kv
-  | "screen_name" -> Some kv
   | "statuses_count" -> Some kv
-  | "url" -> Some kv
   | "utc_offset" -> Some kv
   | _ -> None
 
