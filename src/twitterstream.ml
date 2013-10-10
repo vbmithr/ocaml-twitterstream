@@ -140,9 +140,9 @@ let sanitize_tweet kv = match fst kv with
   | "user" -> Some ("user", sanitize_json_object sanitize_user (snd kv))
   | _ -> None
 
-let main ?db_uri ~creds ~rng ~tracks =
+let main ?db_uri ~db_name ~creds ~rng ~tracks =
   Couchdb.handle ?uri:db_uri () >>= fun h ->
-  Couchdb.DB.create h "twitter" >>= fun _ ->
+  Couchdb.DB.create h db_name >>= fun _ ->
   let main_exn () =
     signed_call ~body:["track", tracks] ~rng ~creds `POST
       (Uri.of_string "https://stream.twitter.com/1.1/statuses/filter.json") >>= function
@@ -158,7 +158,7 @@ let main ?db_uri ~creds ~rng ~tracks =
             (* Capture exceptions from CouchDB. We don't want to
                reconnect to twitter because of a CouchDB error. *)
             Lwt.try_bind
-              (fun () -> Couchdb.Doc.add h "twitter" json)
+              (fun () -> Couchdb.Doc.add h db_name json)
               (function
                  | `Success (st, _) -> Lwt_io.printf "%s %s\n" id (Couchdb.string_of_status st)
                  | `Failure (st, err) -> Lwt_io.printf "%s %s: %s\n" id (Couchdb.string_of_status st) err)
@@ -176,12 +176,14 @@ let main ?db_uri ~creds ~rng ~tracks =
 let _ =
   let open Arg in
   let db_uri = ref "http://localhost:5984" in
+  let db_name = ref "twitter" in
   let conf_file = ref ".twitterstream" in
   let tracks = ref [] in
   let speclist = align [
-      "--conf", Set_string conf_file, "<string> Path of the configuration file (default: .twitterstream).";
-      "--db-uri", Set_string db_uri, "<string> URI of the CouchDB database in use (default: http://localhost:5984).";
-      "--daemon", Set daemonize, " Start the program as a daemon."
+      "--conf", Set_string conf_file, "<string> Path of the configuration file (default: .twitterstream)";
+      "--db-name", Set_string db_name, "<string> Name of the CouchDB database";
+      "--db-uri", Set_string db_uri, "<string> URI of the CouchDB server in use (default: http://localhost:5984)";
+      "--daemon", Set daemonize, " Start the program as a daemon"
     ] in
   let anon_fun s = tracks := s::!tracks in
   let usage_msg = "Usage: " ^ Sys.argv.(0) ^ " <options> track [tracks...]\nOptions are:" in
@@ -192,4 +194,4 @@ let _ =
   if !daemonize then Lwt_daemon.daemonize ();
   let open Cryptokit in
   let rng = Random.device_rng "/dev/urandom" in
-  Lwt_main.run (main ~db_uri:!db_uri ~creds ~rng ~tracks:!tracks)
+  Lwt_main.run (main ~db_uri:!db_uri ~db_name:!db_name ~creds ~rng ~tracks:!tracks)
