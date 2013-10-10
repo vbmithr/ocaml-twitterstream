@@ -191,5 +191,5 @@ let _ =
   close_in ic;
   if !daemonize then Lwt_daemon.daemonize ();
   let open Cryptokit in
-  let rng = Random.pseudo_rng (Random.string Random.secure_rng 20) in
+  let rng = Random.device_rng "/dev/urandom" in
   Lwt_main.run (main ~db_uri:!db_uri ~creds ~rng ~tracks:!tracks)
