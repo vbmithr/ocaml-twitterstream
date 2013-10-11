@@ -141,41 +141,46 @@ let sanitize_tweet kv = match fst kv with
   | _ -> None
 
 let main ?db_uri ~db_name ~creds ~rng ~tracks =
-  Couchdb.handle ?uri:db_uri () >>= fun h ->
-  Couchdb.DB.create h db_name >>= fun _ ->
-  let main_exn () =
-    signed_call ~body:["track", tracks] ~rng ~creds `POST
-      (Uri.of_string "https://stream.twitter.com/1.1/statuses/filter.json") >>= function
-    | None -> Lwt.fail (Failure "signed_call returned None")
-    | Some (resp, body) ->
-      Lwt_stream.(
-        CB.stream_of_body body
-        |> map (fun s -> try YB.from_string s with _ -> `Null)
-        |> filter is_tweet
-        |> map (sanitize_json_object sanitize_tweet)
-        |> iter_s (fun json ->
-            let id = json |> YB.Util.member "_id" |> YB.Util.to_string in
-            (* Capture exceptions from CouchDB. We don't want to
-               reconnect to twitter because of a CouchDB error. *)
-            Lwt.try_bind
-              (fun () -> Couchdb.Doc.add h db_name json)
-              (function
-                 | `Success (st, _) -> Lwt_io.printf "%s %s\n" id (Couchdb.string_of_status st)
-                 | `Failure (st, err) -> Lwt_io.printf "%s %s: %s\n" id (Couchdb.string_of_status st) err)
-              (fun exn -> Lwt_io.printf "%s: CouchDB raised %s\n" id (Printexc.to_string exn))
-          ))
-  in
-  let rec main () =
-    Lwt.catch main_exn
-      (fun exn ->
-         Lwt_io.printf "Caught unhandled exception %s\n"
-           (Printexc.to_string exn)) >>= fun () ->
-    main ()
-  in main ()
+  if tracks = []
+  then
+    (prerr_endline "You have to specify at least one track.";
+     exit 1)
+  else
+    Couchdb.handle ?uri:db_uri () >>= fun h ->
+    Couchdb.DB.create h db_name >>= fun _ ->
+    let main_exn () =
+      signed_call ~body:["track", tracks] ~rng ~creds `POST
+        (Uri.of_string "https://stream.twitter.com/1.1/statuses/filter.json") >>= function
+      | None -> Lwt.fail (Failure "signed_call returned None")
+      | Some (resp, body) ->
+        Lwt_stream.(
+          CB.stream_of_body body
+          |> map (fun s -> try YB.from_string s with _ -> `Null)
+          |> filter is_tweet
+          |> map (sanitize_json_object sanitize_tweet)
+          |> iter_s (fun json ->
+              let id = json |> YB.Util.member "_id" |> YB.Util.to_string in
+              (* Capture exceptions from CouchDB. We don't want to
+                 reconnect to twitter because of a CouchDB error. *)
+              Lwt.try_bind
+                (fun () -> Couchdb.Doc.add h db_name json)
+                (function
+                  | `Success (st, _) -> Lwt_io.printf "%s %s\n" id (Couchdb.string_of_status st)
+                  | `Failure (st, err) -> Lwt_io.printf "%s %s: %s\n" id (Couchdb.string_of_status st) err)
+                (fun exn -> Lwt_io.printf "%s: CouchDB raised %s\n" id (Printexc.to_string exn))
+            ))
+    in
+    let rec main () =
+      Lwt.catch main_exn
+        (fun exn ->
+           Lwt_io.printf "Caught unhandled exception %s\n"
+             (Printexc.to_string exn)) >>= fun () ->
+      main ()
+    in main ()
 
 let _ =
   let open Arg in
-  let db_uri = ref "http://localhost:5984" in
+  let db_uri = ref "http://127.0.0.1:5984" in
   let db_name = ref "twitter" in
   let conf_file = ref ".twitterstream" in
   let tracks = ref [] in
