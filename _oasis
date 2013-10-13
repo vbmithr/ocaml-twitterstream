@@ -11,4 +11,4 @@ Executable twitterstream
   Path: src
   MainIs: twitterstream.ml
   CompiledObject: best
-  BuildDepends: cohttp.lwt, cryptokit, yojson, couchdb
+  BuildDepends: cohttp.lwt, cryptokit, yojson, couchdb, optcomp
