@@ -3,10 +3,20 @@ module C  = Cohttp_lwt_unix.Client
 module CB = Cohttp_lwt_body
 module YB = Yojson.Basic
 
-let (>>=) = Lwt.bind
+#if ocaml_version < (4, 1)
+let (@@) f x = f x
 let (|>) x f = f x
+#endif
+
+let (>>=) = Lwt.bind
 
 let daemonize = ref false
+
+(* Sets the default logger to be stdout with a custom template *)
+let _ = Lwt_log.default := Lwt_log.channel
+            ~template:"$(date).$(milliseconds) [$(level)]: $(message)"
+            ~close_mode:`Keep
+            ~channel:Lwt_io.stdout ()
 
 type creds = {
   consumer_key: string;
@@ -140,14 +150,26 @@ let sanitize_tweet kv = match fst kv with
   | "user" -> Some ("user", sanitize_json_object sanitize_user (snd kv))
   | _ -> None
 
-let main ?db_uri ~db_name ~creds ~rng ~tracks =
+let make_couchdb_write_fun ?uri db_name =
+  Couchdb.handle ?uri () >>= fun h ->
+  Couchdb.DB.create h db_name >>= fun _ ->
+  Lwt.return (fun json ->
+    let id = json |> YB.Util.member "_id" |> YB.Util.to_string in
+    (* Capture exceptions from CouchDB. We don't want to
+                 reconnect to twitter because of a CouchDB error. *)
+    Lwt.try_bind
+      (fun () -> Couchdb.Doc.add h db_name json)
+      (function
+        | `Success (st, _) -> Lwt_log.info_f "%s %s\n" id (Couchdb.string_of_status st)
+        | `Failure (st, err) -> Lwt_log.error_f "%s %s: %s\n" id (Couchdb.string_of_status st) err)
+      (fun exn -> Lwt_log.error_f ~exn "%s: Caught CouchDB exn" id))
+
+let main ~creds ~rng ~tracks write_fun =
   if tracks = []
   then
     (prerr_endline "You have to specify at least one track.";
      exit 1)
   else
-    Couchdb.handle ?uri:db_uri () >>= fun h ->
-    Couchdb.DB.create h db_name >>= fun _ ->
     let main_exn () =
       signed_call ~body:["track", tracks] ~rng ~creds `POST
         (Uri.of_string "https://stream.twitter.com/1.1/statuses/filter.json") >>= function
@@ -158,17 +180,7 @@ let main ?db_uri ~db_name ~creds ~rng ~tracks =
           |> map (fun s -> try YB.from_string s with _ -> `Null)
           |> filter is_tweet
           |> map (sanitize_json_object sanitize_tweet)
-          |> iter_s (fun json ->
-              let id = json |> YB.Util.member "_id" |> YB.Util.to_string in
-              (* Capture exceptions from CouchDB. We don't want to
-                 reconnect to twitter because of a CouchDB error. *)
-              Lwt.try_bind
-                (fun () -> Couchdb.Doc.add h db_name json)
-                (function
-                  | `Success (st, _) -> Lwt_io.printf "%s %s\n" id (Couchdb.string_of_status st)
-                  | `Failure (st, err) -> Lwt_io.printf "%s %s: %s\n" id (Couchdb.string_of_status st) err)
-                (fun exn -> Lwt_io.printf "%s: CouchDB raised %s\n" id (Printexc.to_string exn))
-            ))
+          |> iter_s (fun json -> write_fun json ))
     in
     let rec main () =
       Lwt.catch main_exn
@@ -179,24 +191,30 @@ let main ?db_uri ~db_name ~creds ~rng ~tracks =
     in main ()
 
 let _ =
-  let open Arg in
-  let db_uri = ref "http://127.0.0.1:5984" in
-  let db_name = ref "twitter" in
+  let use_stdout = ref false in
+  let db_uri = ref "http://127.0.0.1:5984/twitter" in
   let conf_file = ref ".twitterstream" in
   let tracks = ref [] in
-  let speclist = align [
+  let speclist = Arg.(align [
       "--conf", Set_string conf_file, "<string> Path of the configuration file (default: .twitterstream)";
-      "--db-name", Set_string db_name, "<string> Name of the CouchDB database";
-      "--db-uri", Set_string db_uri, "<string> URI of the CouchDB server in use (default: http://localhost:5984)";
-      "--daemon", Set daemonize, " Start the program as a daemon"
-    ] in
+      "--stdout", Set use_stdout, " Print json to stdout instead of CouchDB";
+      "--db_uri", Set_string db_uri, "<string> URI of the CouchDB database in use (default: http://localhost:5984/twitter)";
+      "--daemon", Set daemonize, " Start the program as a daemon";
+      "-v", Unit (fun () -> Lwt_log.(add_rule "*" Info)), " Be verbose";
+      "-vv", Unit (fun () -> Lwt_log.(add_rule "*" Debug)), " Be more verbose"
+    ]) in
   let anon_fun s = tracks := s::!tracks in
   let usage_msg = "Usage: " ^ Sys.argv.(0) ^ " <options> track [tracks...]\nOptions are:" in
-  parse speclist anon_fun usage_msg;
+  Arg.parse speclist anon_fun usage_msg;
   let ic = open_in !conf_file in
   let creds = creds_of_json (YB.from_channel ic) in
   close_in ic;
   if !daemonize then Lwt_daemon.daemonize ();
-  let open Cryptokit in
-  let rng = Random.device_rng "/dev/urandom" in
-  Lwt_main.run (main ~db_uri:!db_uri ~db_name:!db_name ~creds ~rng ~tracks:!tracks)
+  let rng = Cryptokit.Random.device_rng "/dev/urandom" in
+  let db_uri = Uri.of_string !db_uri in
+  let db_uri, db_name = Uri.with_path db_uri "", Uri.path db_uri in
+  Lwt_main.run ((if !use_stdout
+                 then (Lwt.return (fun json -> Lwt_io.printf "%s\n" (YB.to_string json)))
+                 else make_couchdb_write_fun ~uri:db_uri db_name)
+                >>= fun write_fun ->
+                main ~creds ~rng ~tracks:!tracks write_fun)
