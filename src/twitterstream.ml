@@ -1,14 +1,9 @@
 open Cohttp
+open Lwt.Infix
+
 module C  = Cohttp_lwt_unix.Client
 module CB = Cohttp_lwt_body
 module YB = Yojson.Basic
-
-#if ocaml_version < (4, 1)
-let (@@) f x = f x
-let (|>) x f = f x
-#endif
-
-let (>>=) = Lwt.bind
 
 let daemonize = ref false
 
@@ -38,21 +33,22 @@ let creds_of_json json =
     }
   | _ -> raise (Invalid_argument "input is not a JSON object")
 
-let nonce ?(len=16) rng =
-  let open Cryptokit in
-  transform_string (Hexa.encode ()) (Random.string rng len)
+let nonce len =
+  let `Hex s =
+    Nocrypto.Rng.generate len |>
+    Hex.of_cstruct
+  in s
 
 let pct_encode = Uri.pct_encode ~component:`Authority
 
 (* https://dev.twitter.com/docs/auth/authorizing-request *)
 (* https://dev.twitter.com/docs/auth/creating-signature *)
-let signed_call ?(headers=Header.init ()) ?(body=[]) ?chunked ~rng ~creds meth uri =
-  let open Cryptokit in
+let signed_call ?(headers=Header.init ()) ?(body=[]) ?chunked ~creds meth uri =
   let base_uri = Uri.to_string (Uri.with_query uri []) in
   let query_params = Uri.query uri in
   let fixed_params =
     ["oauth_consumer_key", [creds.consumer_key];
-     "oauth_nonce", [nonce rng];
+     "oauth_nonce", [nonce 16];
      "oauth_signature_method", ["HMAC-SHA1"];
      "oauth_timestamp", [string_of_int (int_of_float (Unix.time ()))];
      "oauth_token", [creds.access_token];
@@ -65,10 +61,9 @@ let signed_call ?(headers=Header.init ()) ?(body=[]) ?chunked ~rng ~creds meth u
   let all_params = List.map (fun (k, v) -> k ^ "=" ^ v) all_params in
   let params_string = String.concat "&" all_params in
   let base_string = [Code.string_of_method meth; pct_encode base_uri; pct_encode params_string] in
-  let base_string = String.concat "&" base_string in
-  let signing_key = pct_encode creds.consumer_secret ^ "&" ^ pct_encode creds.access_token_secret in
-  let signature = hash_string (MAC.hmac_sha1 signing_key) base_string in
-  let signature = transform_string (Base64.encode_compact_pad ()) signature in
+  let base_string = String.concat "&" base_string |> Cstruct.of_string in
+  let signing_key = pct_encode creds.consumer_secret ^ "&" ^ pct_encode creds.access_token_secret |> Cstruct.of_string in
+  let signature = Nocrypto.(Hash.SHA1.hmac ~key:signing_key base_string |> Base64.encode) |> Cstruct.to_string in
   let authorization_string = ("oauth_signature", [signature])::fixed_params in
   let authorization_string = List.map (fun (k, vs) ->
       pct_encode k,
@@ -78,7 +73,7 @@ let signed_call ?(headers=Header.init ()) ?(body=[]) ?chunked ~rng ~creds meth u
   let body_string = List.map (fun (k, vs) -> k, String.concat "," vs) body in
   let body_string = List.map (fun (k, v) -> k ^ "=" ^ v) body_string in
   let body_string = String.concat "&" body_string in
-  let body = CB.body_of_string body_string in
+  let body = CB.of_string body_string in
   let headers = List.fold_left (fun a (k,v) -> Header.add a k v) headers
       ([ "User-Agent", "athanor/0.1";
         "Authorization", authorization_string
@@ -86,7 +81,7 @@ let signed_call ?(headers=Header.init ()) ?(body=[]) ?chunked ~rng ~creds meth u
       "Content-Length", string_of_int (String.length body_string);
       "Content-Type", "application/x-www-form-urlencoded"
     ] else []) in
-  C.call ~headers ?body ?chunked meth uri
+  C.call ~headers ~body ?chunked meth uri
 
 (* Filter out everything that is not a tweet object *)
 let is_tweet = function
@@ -150,33 +145,18 @@ let sanitize_tweet kv = match fst kv with
   | "user" -> Some ("user", sanitize_json_object sanitize_user (snd kv))
   | _ -> None
 
-let make_couchdb_write_fun ?uri db_name =
-  Couchdb.handle ?uri () >>= fun h ->
-  Couchdb.DB.create h db_name >>= fun _ ->
-  Lwt.return (fun json ->
-    let id = json |> YB.Util.member "_id" |> YB.Util.to_string in
-    (* Capture exceptions from CouchDB. We don't want to
-                 reconnect to twitter because of a CouchDB error. *)
-    Lwt.try_bind
-      (fun () -> Couchdb.Doc.add h db_name json)
-      (function
-        | `Success (st, _) -> Lwt_log.info_f "%s %s\n" id (Couchdb.string_of_status st)
-        | `Failure (st, err) -> Lwt_log.error_f "%s %s: %s\n" id (Couchdb.string_of_status st) err)
-      (fun exn -> Lwt_log.error_f ~exn "%s: Caught CouchDB exn" id))
-
-let main ~creds ~rng ~tracks write_fun =
+let main ~creds ~tracks write_fun =
   if tracks = []
   then
     (prerr_endline "You have to specify at least one track.";
      exit 1)
   else
     let main_exn () =
-      signed_call ~body:["track", tracks] ~rng ~creds `POST
+      signed_call ~body:["track", tracks] ~creds `POST
         (Uri.of_string "https://stream.twitter.com/1.1/statuses/filter.json") >>= function
-      | None -> Lwt.fail (Failure "signed_call returned None")
-      | Some (resp, body) ->
+      | resp, body ->
         Lwt_stream.(
-          CB.stream_of_body body
+          CB.to_stream body
           |> map (fun s -> try YB.from_string s with _ -> `Null)
           |> filter is_tweet
           |> map (sanitize_json_object sanitize_tweet)
@@ -191,14 +171,10 @@ let main ~creds ~rng ~tracks write_fun =
     in main ()
 
 let _ =
-  let use_stdout = ref false in
-  let db_uri = ref "http://127.0.0.1:5984/twitter" in
   let conf_file = ref ".twitterstream" in
   let tracks = ref [] in
   let speclist = Arg.(align [
       "--conf", Set_string conf_file, "<string> Path of the configuration file (default: .twitterstream)";
-      "--stdout", Set use_stdout, " Print json to stdout instead of CouchDB";
-      "--db_uri", Set_string db_uri, "<string> URI of the CouchDB database in use (default: http://localhost:5984/twitter)";
       "--daemon", Set daemonize, " Start the program as a daemon";
       "-v", Unit (fun () -> Lwt_log.(add_rule "*" Info)), " Be verbose";
       "-vv", Unit (fun () -> Lwt_log.(add_rule "*" Debug)), " Be more verbose"
@@ -210,11 +186,9 @@ let _ =
   let creds = creds_of_json (YB.from_channel ic) in
   close_in ic;
   if !daemonize then Lwt_daemon.daemonize ();
-  let rng = Cryptokit.Random.device_rng "/dev/urandom" in
-  let db_uri = Uri.of_string !db_uri in
-  let db_uri, db_name = Uri.with_path db_uri "", Uri.path db_uri in
-  Lwt_main.run ((if !use_stdout
-                 then (Lwt.return (fun json -> Lwt_io.printf "%s\n" (YB.to_string json)))
-                 else make_couchdb_write_fun ~uri:db_uri db_name)
-                >>= fun write_fun ->
-                main ~creds ~rng ~tracks:!tracks write_fun)
+  let write_fun json = Lwt_io.printf "%s\n" (YB.to_string json) in
+  let run () =
+    Nocrypto_entropy_lwt.initialize () >>
+    main ~creds ~tracks:!tracks write_fun
+  in
+  Lwt_main.run @@ run ()

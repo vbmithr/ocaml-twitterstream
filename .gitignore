@@ -1,6 +1,5 @@
 .twitterstream
 _build
-setup.data
-setup.log
 *.native
 *.byte
+*.install
