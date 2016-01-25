@@ -8,7 +8,7 @@ module YB = Yojson.Basic
 let daemonize = ref false
 
 (* Sets the default logger to be stdout with a custom template *)
-let _ = Lwt_log.default := Lwt_log.channel
+let () = Lwt_log.default := Lwt_log.channel
             ~template:"$(date).$(milliseconds) [$(level)]: $(message)"
             ~close_mode:`Keep
             ~channel:Lwt_io.stdout ()
@@ -119,9 +119,7 @@ let sanitize_date date_string =
   | _ -> raise (Invalid_argument "not a twitter date")
 
 let sanitize_user kv = match fst kv with
-  | "created_at" -> snd kv |> YB.Util.to_string |>
-    sanitize_date |> fst |> int_of_float |> string_of_int
-    |> fun t -> Some ("created_at", `String t)
+  | "created_at" -> snd kv |> YB.Util.to_string |> sanitize_date |> fun (t, _) -> Some ("created_at", `Int (int_of_float t))
   | "followers_count" -> Some kv
   | "friends_count" -> Some kv
   | "id_str" -> Some ("_id", snd kv)
@@ -131,9 +129,7 @@ let sanitize_user kv = match fst kv with
   | _ -> None
 
 let sanitize_tweet kv = match fst kv with
-  | "created_at" -> snd kv |> YB.Util.to_string |>
-    sanitize_date |> fst |> int_of_float |> string_of_int
-    |> fun t -> Some ("created_at", `String t)
+  | "created_at" -> snd kv |> YB.Util.to_string |> sanitize_date |> fun (t, _) -> Some ("created_at", `Int (int_of_float t))
   | "favorite_count" -> Some kv
   | "id_str" -> Some ("_id", snd kv)
   | "in_reply_to_status_id" -> Some kv
@@ -155,23 +151,21 @@ let main ~creds ~tracks write_fun =
       signed_call ~body:["track", tracks] ~creds `POST
         (Uri.of_string "https://stream.twitter.com/1.1/statuses/filter.json") >>= function
       | resp, body ->
-        Lwt_stream.(
+        Lwt_log.ign_debug "Connected!";
+        let open Lwt_stream in
           CB.to_stream body
           |> map (fun s -> try YB.from_string s with _ -> `Null)
           |> filter is_tweet
           |> map (sanitize_json_object sanitize_tweet)
-          |> iter_s (fun json -> write_fun json ))
+          |> iter_s (fun json -> write_fun json)
     in
     let rec main () =
-      Lwt.catch main_exn
-        (fun exn ->
-           Lwt_io.printf "Caught unhandled exception %s\n"
-             (Printexc.to_string exn)) >>= fun () ->
-      main ()
+      try%lwt main_exn ()
+      with exn -> Lwt_log.error ~exn "Caught unhandled exception"
     in main ()
 
 let _ =
-  let conf_file = ref ".twitterstream" in
+  let conf_file = ref "config.json" in
   let tracks = ref [] in
   let speclist = Arg.(align [
       "--conf", Set_string conf_file, "<string> Path of the configuration file (default: .twitterstream)";
@@ -189,6 +183,8 @@ let _ =
   let write_fun json = Lwt_io.printf "%s\n" (YB.to_string json) in
   let run () =
     Nocrypto_entropy_lwt.initialize () >>
-    main ~creds ~tracks:!tracks write_fun
+    (Lwt_log.ign_debug "Started.";
+     main ~creds ~tracks:!tracks write_fun
+    )
   in
   Lwt_main.run @@ run ()
