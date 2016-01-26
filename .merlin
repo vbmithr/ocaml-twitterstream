@@ -1,7 +1,10 @@
 PRJ twitterstream
+S src
 B _build
+B _build/src
 PKG cryptokit
 PKG cohttp
+PKG uri
 PKG lwt.ppx
 PKG yojson
 PKG nocrypto
