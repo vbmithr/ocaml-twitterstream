@@ -6,3 +6,6 @@ PKG lwt.ppx
 PKG yojson
 PKG nocrypto
 PKG hex
+PKG ppx_deriving.std
+PKG ppx_deriving_yojson
+PKG containers

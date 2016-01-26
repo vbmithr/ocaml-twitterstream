@@ -4,6 +4,7 @@ open Lwt.Infix
 module C  = Cohttp_lwt_unix.Client
 module CB = Cohttp_lwt_body
 module YB = Yojson.Basic
+module YS = Yojson.Safe
 
 let daemonize = ref false
 
@@ -18,20 +19,7 @@ type creds = {
   consumer_secret: string;
   access_token: string;
   access_token_secret: string;
-}
-
-let creds_of_json json =
-  let extract_field name assoc = match List.assoc name assoc with
-    | `String s -> s
-    | _ -> raise (Invalid_argument "corrupted input") in
-  match json with
-  | `Assoc assoc -> {
-      consumer_key = extract_field "consumer_key" assoc;
-      consumer_secret = extract_field "consumer_secret" assoc;
-      access_token = extract_field "access_token" assoc;
-      access_token_secret = extract_field "access_token_secret" assoc
-    }
-  | _ -> raise (Invalid_argument "input is not a JSON object")
+} [@@deriving yojson]
 
 let nonce len =
   let `Hex s =
@@ -85,12 +73,16 @@ let signed_call ?(headers=Header.init ()) ?(body=[]) ?chunked ~creds meth uri =
 
 (* Filter out everything that is not a tweet object *)
 let is_tweet = function
-  | `Assoc _ as a -> (match YB.Util.member "created_at" a with `Null -> false | _ -> true)
-  | _ -> false
+  | `Assoc assocs -> begin
+      match CCList.Assoc.get assocs "created_at" with
+      | Some v when v <> `Null -> true
+      | _ -> false
+    end
+  | #YB.json -> false
 
 let sanitize_json_object f = function
   | `Assoc assocs -> `Assoc (YB.Util.filter_map f assocs)
-  | _ -> raise (Invalid_argument "not a JSON object")
+  | #YB.json -> invalid_arg "not a JSON object"
 
 let sanitize_date date_string =
   let int_of_month = function
@@ -118,51 +110,41 @@ let sanitize_date date_string =
     )
   | _ -> raise (Invalid_argument "not a twitter date")
 
-let sanitize_user kv = match fst kv with
-  | "created_at" -> snd kv |> YB.Util.to_string |> sanitize_date |> fun (t, _) -> Some ("created_at", `Int (int_of_float t))
+let sanitize_user ((k, v) as kv) = match k with
+  | "created_at" -> v |> YB.Util.to_string |> sanitize_date |> fun (t, _) -> Some ("created_at", `Int (int_of_float t))
   | "followers_count" -> Some kv
   | "friends_count" -> Some kv
-  | "id_str" -> Some ("_id", snd kv)
+  | "id_str" -> Some ("_id", v)
   | "lang" -> Some kv
   | "statuses_count" -> Some kv
   | "utc_offset" -> Some kv
   | _ -> None
 
-let sanitize_tweet kv = match fst kv with
-  | "created_at" -> snd kv |> YB.Util.to_string |> sanitize_date |> fun (t, _) -> Some ("created_at", `Int (int_of_float t))
+let sanitize_tweet ((k, v) as kv) = match k with
+  | "created_at" -> v |> YB.Util.to_string |> sanitize_date |> fun (t, _) -> Some ("created_at", `Int (int_of_float t))
   | "favorite_count" -> Some kv
-  | "id_str" -> Some ("_id", snd kv)
+  | "id_str" -> Some ("_id", v)
   | "in_reply_to_status_id" -> Some kv
   | "in_reply_to_user_id" -> Some kv
   | "lang" -> Some kv
   | "text" -> Some kv
   | "retweet_count" -> Some kv
   | "retweeted" -> Some kv
-  | "user" -> Some ("user", sanitize_json_object sanitize_user (snd kv))
+  | "user" -> Some ("user", sanitize_json_object sanitize_user v)
   | _ -> None
 
-let main ~creds ~tracks write_fun =
-  if tracks = []
-  then
-    (prerr_endline "You have to specify at least one track.";
-     exit 1)
-  else
-    let main_exn () =
-      signed_call ~body:["track", tracks] ~creds `POST
-        (Uri.of_string "https://stream.twitter.com/1.1/statuses/filter.json") >>= function
-      | resp, body ->
-        Lwt_log.ign_debug "Connected!";
-        let open Lwt_stream in
-          CB.to_stream body
-          |> map (fun s -> try YB.from_string s with _ -> `Null)
-          |> filter is_tweet
-          |> map (sanitize_json_object sanitize_tweet)
-          |> iter_s (fun json -> write_fun json)
-    in
-    let rec main () =
-      try%lwt main_exn ()
-      with exn -> Lwt_log.error ~exn "Caught unhandled exception"
-    in main ()
+let stream ~creds ~tracks write_fun =
+  let creds = List.hd creds in
+  signed_call ~body:["track", tracks] ~creds `POST
+    (Uri.of_string "https://stream.twitter.com/1.1/statuses/filter.json") >>= function
+  | resp, body ->
+      Lwt_log.ign_debug "Connected!";
+      let open Lwt_stream in
+      CB.to_stream body
+      |> map (fun s -> try YB.from_string s with _ -> `Null)
+      |> filter is_tweet
+      |> map (sanitize_json_object sanitize_tweet)
+      |> iter_s (fun json -> write_fun json)
 
 let _ =
   let conf_file = ref "config.json" in
@@ -176,15 +158,24 @@ let _ =
   let anon_fun s = tracks := s::!tracks in
   let usage_msg = "Usage: " ^ Sys.argv.(0) ^ " <options> track [tracks...]\nOptions are:" in
   Arg.parse speclist anon_fun usage_msg;
-  let ic = open_in !conf_file in
-  let creds = creds_of_json (YB.from_channel ic) in
-  close_in ic;
-  if !daemonize then Lwt_daemon.daemonize ();
-  let write_fun json = Lwt_io.printf "%s\n" (YB.to_string json) in
-  let run () =
-    Nocrypto_entropy_lwt.initialize () >>
-    (Lwt_log.ign_debug "Started.";
-     main ~creds ~tracks:!tracks write_fun
-    )
-  in
-  Lwt_main.run @@ run ()
+    let creds = match (YS.from_file !conf_file) with
+      | `List creds ->
+          CCList.filter_map
+            (fun c -> match creds_of_yojson c with `Ok c -> Some c | `Error _ -> None)
+            creds
+      | #YS.json -> invalid_arg "config file"
+    in
+    if !daemonize then Lwt_daemon.daemonize ();
+    let write_fun json = Lwt_io.printf "%s\n" (YB.to_string json) in
+    match  !tracks with
+    | [] ->
+        prerr_endline "You have to specify at least one track.";
+        exit 1
+    | tracks ->
+        let run () =
+          Nocrypto_entropy_lwt.initialize () >>
+          (Lwt_log.ign_debug "Started.";
+           stream ~creds ~tracks write_fun
+          )
+        in
+        Lwt_main.run @@ run ()

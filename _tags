@@ -6,4 +6,7 @@ true: debug, bin_annot
                        package(nocrypto.lwt), \
                        package(cohttp.lwt), \
                        package(re.str), \
-                       package(yojson)
+                       package(yojson), \
+                       package(ppx_deriving.std), \
+                       package(ppx_deriving_yojson), \
+                       package(containers)
